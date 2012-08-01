@@ -94,6 +94,10 @@ char const  *amqp_password    = AMQP_USERNAME;
 char const  *amqp_exchange    = AMQP_EXCHANGE;
 char const  *amqp_routingkey  = AMQP_ROUTINGKEY;
 
+// the original serial port settings to restore when ending
+struct termios oldtio;
+// file descriptior for open/read serial port
+int fd;
 
 void print_help(const char *program_name) {
   fprintf(stderr, "Usage: %s [options]\n", program_name);
@@ -116,7 +120,9 @@ void print_help(const char *program_name) {
 void signal_callback_handler(int signum)
 {
   fprintf(stderr, "Caught signal %d\n", signum);
-  // Cleanup and close up stuff here
+
+  // restore the old port settings
+  tcsetattr(fd, TCSANOW, &oldtio);
 
   // Terminate program
   exit(signum);
@@ -274,6 +280,7 @@ int main(int argc, char **argv)
 {
   // Register signal and signal handler
   signal(SIGINT, signal_callback_handler);
+  signal(SIGTERM, signal_callback_handler);
 
   // first we need to check environment variables for our config
   if (NULL != getenv("S2A_DEVICE"))         { serial_device = getenv("S2A_DEVICE"); }
@@ -354,9 +361,7 @@ int main(int argc, char **argv)
   if (amqp_port < 0)      { bomb(1, "Bad port"); }
   if (amqp_port > 65535)  { bomb(1, "Bad port"); }
 
-  int fd;   // file descriptior for open/read serial port
   int res;  // throaway value for capturing results of functions
-  struct termios oldtio;  // the original serial port settings to restore when ending
   struct termios newtio;  // the settings we want for the serial port
   /*
    * Open modem device for reading and writing and not as controlling tty
@@ -486,9 +491,4 @@ int main(int argc, char **argv)
     // exit if the buffer starts with 'z' (TODO)
     //if (buf[0]=='z') STOP=TRUE;
   }
-
-  // restore the old port settings
-  tcsetattr(fd, TCSANOW, &oldtio);
-
-  return EXIT_SUCCESS;
 }
