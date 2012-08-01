@@ -93,7 +93,6 @@ char const  *amqp_username    = AMQP_PASSWORD;
 char const  *amqp_password    = AMQP_USERNAME;
 char const  *amqp_exchange    = AMQP_EXCHANGE;
 char const  *amqp_routingkey  = AMQP_ROUTINGKEY;
-int         foreground_flag   = 0;
 
 
 void print_help(const char *program_name) {
