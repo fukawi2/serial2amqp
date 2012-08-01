@@ -92,6 +92,7 @@ char const  *amqp_username    = AMQP_PASSWORD;
 char const  *amqp_password    = AMQP_USERNAME;
 char const  *amqp_exchange    = AMQP_EXCHANGE;
 char const  *amqp_routingkey  = AMQP_ROUTINGKEY;
+int         foreground_flag   = 0;
 
 
 void print_help(const char *program_name) {
@@ -106,6 +107,7 @@ void print_help(const char *program_name) {
   fprintf(stderr, "  --exchange/-E amq.direct exhange to publish to\n");
   fprintf(stderr, "  --key/-K default         routing key to publish to\n");
   fprintf(stderr, "  --vhost/-V /             amqp virtual host to publish to\n");
+  fprintf(stderr, "  --foreground/-f          do not daemonize\n");
 }
 
 
@@ -297,11 +299,12 @@ int main(int argc, char **argv)
       {"exchange",    required_argument,  0,  'E'},
       {"key",         required_argument,  0,  'K'},
       {"vhost",       required_argument,  0,  'V'},
+      {"foreground",  no_argument,        0,  'f'},
       {0, 0, 0, 0}
     };
     int c;
     int option_index = 0;
-    c = getopt_long(argc, argv, "D:d:H:p:U:P:E:K:V:?",
+    c = getopt_long(argc, argv, "D:d:H:p:U:P:E:K:V:f?",
                     long_options, &option_index);
     if(c == -1)
       break;
@@ -338,6 +341,8 @@ int main(int argc, char **argv)
         debug_level = debug_level >= 0 ? debug_level : DEBUGLEVEL;
         debug_level = debug_level <= 9 ? debug_level : DEBUGLEVEL;
         break;
+      case 'f':
+        foreground_flag = 1;
       case '?':
       default:
         print_help(argv[0]);
@@ -420,9 +425,36 @@ int main(int argc, char **argv)
   tcflush(fd, TCIFLUSH);
   tcsetattr(fd, TCSANOW, &newtio);
 
-  /*
-   * terminal settings done, now handle input
-  */
+  // ready to handle input; daemonize if required
+  // refer: http://www.danielhall.me/2010/01/writing-a-daemon-in-c/
+  if (0 == foreground_flag) {
+    pid_t pid;
+    pid = fork();
+    // If the pid is less than zero, something went wrong when forking
+    if (pid < 0)
+      bomb(EXIT_FAILURE, "Failed to fork child process");
+    /* If the pid we got back was greater than zero, then the clone was
+       successful and we are the parent. */
+    if (pid > 0)
+      exit(EXIT_SUCCESS);
+
+    // If execution reaches this point we are the child
+    umask(0);
+    pid_t sid;
+    sid = setsid();
+    // set session id for child process
+    if (sid < 0)
+      bomb(EXIT_FAILURE, "Could not create process group for child process");
+    // chdir to root
+    if ((chdir("/")) < 0)
+      bomb(EXIT_FAILURE, "Could not change working directory to /");
+    // Close the standard file descriptors
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+  }
+
+  // serial port settings done, now handle input
   debug_print(2, "Begining loop");
   char buf[255];
   char dbgmsg[255];
