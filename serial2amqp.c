@@ -81,8 +81,9 @@
 
 volatile int STOP=FALSE;
 
-char const *serial_device = MODEMDEVICE;
-static int debug_level = DEBUGLEVEL;
+char const *serial_device   = MODEMDEVICE;
+static int debug_level      = DEBUGLEVEL;
+static int foreground_flag  = 0;
 
 // amqp broker configuration
 char const  *amqp_hostname    = AMQP_HOSTNAME;
