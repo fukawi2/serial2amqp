@@ -50,6 +50,7 @@
 #include <getopt.h>   // getopt_long()
 #include <signal.h>   // handling signals
 #include <termios.h>  // all serial port functions and constants
+#include <syslog.h>   // logging
 //#include <sys/types.h>
 //#include <sys/stat.h>
 
@@ -81,18 +82,19 @@
 
 volatile int STOP=FALSE;
 
-char const *serial_device   = MODEMDEVICE;
+char serial_device[100]     = MODEMDEVICE;
 static int debug_level      = DEBUGLEVEL;
 static int foreground_flag  = 0;
+static int daemonized       = 0;
 
 // amqp broker configuration
-char const  *amqp_hostname    = AMQP_HOSTNAME;
-int         amqp_port         = AMQP_PORT;
-char const  *amqp_vhost       = AMQP_VHOST;
-char const  *amqp_username    = AMQP_PASSWORD;
-char const  *amqp_password    = AMQP_USERNAME;
-char const  *amqp_exchange    = AMQP_EXCHANGE;
-char const  *amqp_routingkey  = AMQP_ROUTINGKEY;
+char amqp_hostname[255]   = AMQP_HOSTNAME;
+int  amqp_port            = AMQP_PORT;
+char amqp_vhost[64]       = AMQP_VHOST;
+char amqp_username[64]    = AMQP_PASSWORD;
+char amqp_password[64]    = AMQP_USERNAME;
+char amqp_exchange[32]    = AMQP_EXCHANGE;
+char amqp_routingkey[128] = AMQP_ROUTINGKEY;
 
 // the original serial port settings to restore when ending
 struct termios oldtio;
@@ -129,18 +131,50 @@ void signal_callback_handler(int signum)
 }
 
 
+
 // helper for fatal errors
 void bomb(int ecode, const char *msg)
 {
-  fprintf(stderr, "ERROR: %s\n", msg);
+  char fmsg[255];  // formatted msg
+  snprintf(fmsg, sizeof(fmsg), "ERROR: %s", msg);
+
+  // print to stderr if we haven't daemonized
+  if (0 == daemonized)
+    fprintf(stderr, "%s\n", fmsg);
+
+  // log to syslog
+  syslog(LOG_MAKEPRI(LOG_DAEMON, LOG_NOTICE), fmsg);
+
   exit(ecode);
 }
 
 
+// helper to log debug messages
 void debug_print(int lvl, const char *msg)
 {
+  /* log to syslog
+   * add 4 to the message level value to approximate
+   * a syslog notice level:
+   * Notice = 5 (1 + 4)
+   * Information = 6 (2 + 4)
+   * Debug = 7 (3 + 4)
+   */
+  int syslog_lvl = lvl+4;
+  if (syslog_lvl > 7)
+    syslog_lvl = 7;
+  syslog(LOG_MAKEPRI(LOG_DAEMON, syslog_lvl), msg);
+
+  // abort if the message is higher debug than the user
+  // wants to see.
   if (lvl > debug_level) return;
-  fprintf(stderr, "DEBUG%d: %s\n", lvl, msg);
+
+  // print to stderr, only if we haven't already daemonized
+  if (0 == daemonized) {
+    char fmsg[255];  // formatted msg
+    snprintf(fmsg, sizeof(fmsg), "DEBUG%d: %s", lvl, msg);
+    fprintf(stderr, fmsg);
+    fprintf(stderr, "\n");
+  }
 }
 
 
@@ -203,8 +237,7 @@ void die_on_amqp_error(amqp_rpc_reply_t x, char const *context) {
 
 
 
-int amqpsend(const char *msg)
-{
+int amqpsend(const char *msg) {
   int amqp_channel = 1; // TODO: handle dynamic channel number
 
   // build the message body
@@ -276,21 +309,20 @@ int amqpsend(const char *msg)
 /******************************************************************************
  * MAIN
  *****************************************************************************/
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
   // Register signal and signal handler
   signal(SIGINT, signal_callback_handler);
   signal(SIGTERM, signal_callback_handler);
 
   // first we need to check environment variables for our config
-  if (NULL != getenv("S2A_DEVICE"))         { serial_device = getenv("S2A_DEVICE"); }
-  if (NULL != getenv("AMQP_HOSTNAME"))      { amqp_hostname = getenv("AMQP_HOSTNAME"); }
+  if (NULL != getenv("S2A_DEVICE"))         { strcpy(serial_device, getenv("S2A_DEVICE")); }
+  if (NULL != getenv("AMQP_HOSTNAME"))      { strcpy(amqp_hostname, getenv("AMQP_HOSTNAME")); }
   if (NULL != getenv("AMQP_PORT"))          { amqp_port = atoi(getenv("AMQP_PORT")); }
-  if (NULL != getenv("AMQP_USERNAME"))      { amqp_username = getenv("AMQP_USERNAME"); }
-  if (NULL != getenv("AMQP_PASSWORD"))      { amqp_password = getenv("AMQP_PASSWORD"); }
-  if (NULL != getenv("AMQP_VHOST"))         { amqp_vhost = getenv("AMQP_VHOST"); }
-  if (NULL != getenv("AMQP_EXCHANGE"))      { amqp_exchange = getenv("AMQP_EXCHANGE"); }
-  if (NULL != getenv("AMQP_ROUTINGKEY"))    { amqp_routingkey = getenv("AMQP_ROUTINGKEY"); }
+  if (NULL != getenv("AMQP_USERNAME"))      { strcpy(amqp_username, getenv("AMQP_USERNAME")); }
+  if (NULL != getenv("AMQP_PASSWORD"))      { strcpy(amqp_password, getenv("AMQP_PASSWORD")); }
+  if (NULL != getenv("AMQP_VHOST"))         { strcpy(amqp_vhost, getenv("AMQP_VHOST")); }
+  if (NULL != getenv("AMQP_EXCHANGE"))      { strcpy(amqp_exchange, getenv("AMQP_EXCHANGE")); }
+  if (NULL != getenv("AMQP_ROUTINGKEY"))    { strcpy(amqp_routingkey, getenv("AMQP_ROUTINGKEY")); }
 
   // overwriting current config with command line options?
   while(1) {
@@ -320,28 +352,28 @@ int main(int argc, char **argv)
       case 0: // no_argument
         break;
       case 'D':
-        serial_device = optarg;
+        strcpy(serial_device, optarg);
         break;
       case 'H':
-        amqp_hostname = optarg;
+        strcpy(amqp_hostname, optarg);
         break;
       case 'p':
         amqp_port = atoi(optarg);
         break;
       case 'U':
-        amqp_username = optarg;
+        strcpy(amqp_username, optarg);
         break;
       case 'P':
-        amqp_password = optarg;
+        strcpy(amqp_password, optarg);
         break;
       case 'E':
-        amqp_exchange = optarg;
+        strcpy(amqp_exchange, optarg);
         break;
       case 'K':
-        amqp_routingkey = optarg;
+        strcpy(amqp_routingkey, optarg);
         break;
       case 'V':
-        amqp_vhost = optarg;
+        strcpy(amqp_vhost, optarg);
         break;
       case 'd':
         debug_level = atoi(optarg);
@@ -350,6 +382,7 @@ int main(int argc, char **argv)
         break;
       case 'f':
         foreground_flag = 1;
+        break;
       case '?':
       default:
         print_help(argv[0]);
@@ -444,6 +477,7 @@ int main(int argc, char **argv)
       exit(EXIT_SUCCESS);
 
     // If execution reaches this point we are the child
+    daemonized = 1;
     umask(0);
     pid_t sid;
     sid = setsid();
@@ -462,7 +496,7 @@ int main(int argc, char **argv)
   // serial port settings done, now handle input
   debug_print(2, "Begining loop");
   char buf[255];
-  char dbgmsg[255];
+  char dbgmsg[300];
   while (STOP == FALSE) {
     /* read blocks program execution until a line terminating character is
      * input, even if more than 255 chars are input. If the number
@@ -481,7 +515,7 @@ int main(int argc, char **argv)
     }
 
     // show debug info
-    sprintf(dbgmsg, "Recv %d characters: %s", res-1, buf);
+    snprintf(dbgmsg, sizeof(dbgmsg), "Recv %d characters: %s", res, buf);
     debug_print(1, dbgmsg);
 
     // output just the received data to stdout
