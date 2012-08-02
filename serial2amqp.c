@@ -121,6 +121,14 @@ void print_help(const char *program_name) {
   fprintf(stderr, "  --key/-K default         routing key to publish to\n");
   fprintf(stderr, "  --vhost/-V /             amqp virtual host to publish to\n");
   fprintf(stderr, "  --foreground/-f          do not daemonize\n");
+  fprintf(stderr, "\n");
+  fprintf(stderr, "The following environment variables may also be set:\n");
+  fprintf(stderr, "  S2A_DEVICE, AMQP_HOSTNAME, AMQP_PORT, AMQP_USERNAME, AMQP_PASSWORD\n");
+  fprintf(stderr, "  AMQP_VHOST, AMQP_EXCHANGE, AMQP_ROUTINGKEY\n");
+  fprintf(stderr, "\n");
+  fprintf(stderr, "IMPORTANT: Using the --pass option could allow other users to discover your\n");
+  fprintf(stderr, "password by looking at process list. You should use the AMQP_PASSWORD environment\n");
+  fprintf(stderr, "variable where possible to guard against this.\n");
 }
 
 
