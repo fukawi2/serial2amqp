@@ -62,7 +62,7 @@
 
 // default configuration constants
 #define MODEMDEVICE "/dev/ttyS0"
-#define DEBUGLEVEL 0
+#define DEBUGLEVEL 1
 #define AMQP_HOSTNAME "amqpbroker";
 #define AMQP_PORT 5672;
 #define AMQP_USERNAME "guest";
@@ -112,6 +112,7 @@ void print_help(const char *program_name) {
   fprintf(stderr, "Options:\n");
   fprintf(stderr, "  --device/-D /dev/ttyXX   specify the serial device to list on (default: \"/dev/ttyS0\")\n");
   fprintf(stderr, "  --debug/-d X             set the debug verbosity level\n");
+  fprintf(stderr, "  --quiet/-q               no output\n");
   fprintf(stderr, "  --host/-H amqpbroker     hostname of the AMQP broker\n");
   fprintf(stderr, "  --port/-p 5762           port to connect to the AMQP broker\n");
   fprintf(stderr, "  --user/-U guest          username for AMQP broker\n");
@@ -156,7 +157,7 @@ void bomb(int ecode, const char *msg)
 
 
 // helper to log debug messages
-void debug_print(int lvl, const char *msg)
+void debug_print(int msg_lvl, const char *msg)
 {
   /* log to syslog
    * add 4 to the message level value to approximate
@@ -165,19 +166,19 @@ void debug_print(int lvl, const char *msg)
    * Information = 6 (2 + 4)
    * Debug = 7 (3 + 4)
    */
-  int syslog_lvl = lvl+4;
+  int syslog_lvl = msg_lvl+4;
   if (syslog_lvl > 7)
     syslog_lvl = 7;
   syslog(LOG_MAKEPRI(LOG_DAEMON, syslog_lvl), msg);
 
   // abort if the message is higher debug than the user
   // wants to see.
-  if (lvl > debug_level) return;
+  if (msg_lvl > debug_level) return;
 
   // print to stderr, only if we haven't already daemonized
   if (0 == daemonized) {
     char fmsg[255];  // formatted msg
-    snprintf(fmsg, sizeof(fmsg), "DEBUG%d: %s", lvl, msg);
+    snprintf(fmsg, sizeof(fmsg), "DEBUG%d: %s", msg_lvl, msg);
     fprintf(stderr, fmsg);
     fprintf(stderr, "\n");
   }
@@ -336,6 +337,7 @@ int main(int argc, char **argv) {
     {
       {"device",      required_argument,  0,  'D'},
       {"debug",       required_argument,  0,  'd'},
+      {"quiet",       no_argument,        0,  'q'},
       {"help",        no_argument,        0,  '?'},
       {"host",        required_argument,  0,  'H'},
       {"port",        required_argument,  0,  'p'},
@@ -349,7 +351,7 @@ int main(int argc, char **argv) {
     };
     int c;
     int option_index = 0;
-    c = getopt_long(argc, argv, "D:d:H:p:U:P:E:K:V:f?",
+    c = getopt_long(argc, argv, "D:d:H:p:U:P:E:K:V:fq?",
                     long_options, &option_index);
     if(c == -1)
       break;
@@ -389,6 +391,9 @@ int main(int argc, char **argv) {
         break;
       case 'f':
         foreground_flag = 1;
+        break;
+      case 'q':
+        debug_level = -1;
         break;
       case '?':
       default:
