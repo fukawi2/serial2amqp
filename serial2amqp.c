@@ -77,6 +77,12 @@
 // POSIX compliant source
 #define _POSIX_SOURCE 1
 
+// use strlcpy instead of strcpy
+// https://security.web.cern.ch/security/recommendations/en/codetools/c.shtml
+#ifndef strlcpy
+#define strlcpy(dst,src,sz) snprintf((dst), (sz), "%s", (src))
+#endif
+
 #define FALSE 0
 #define TRUE 1
 
@@ -315,14 +321,14 @@ int main(int argc, char **argv) {
   signal(SIGTERM, signal_callback_handler);
 
   // first we need to check environment variables for our config
-  if (NULL != getenv("S2A_DEVICE"))         { strcpy(serial_device, getenv("S2A_DEVICE")); }
-  if (NULL != getenv("AMQP_HOSTNAME"))      { strcpy(amqp_hostname, getenv("AMQP_HOSTNAME")); }
+  if (NULL != getenv("S2A_DEVICE"))         { strlcpy(serial_device, getenv("S2A_DEVICE"), sizeof(serial_device)); }
+  if (NULL != getenv("AMQP_HOSTNAME"))      { strlcpy(amqp_hostname, getenv("AMQP_HOSTNAME"), sizeof(amqp_hostname)); }
   if (NULL != getenv("AMQP_PORT"))          { amqp_port = atoi(getenv("AMQP_PORT")); }
-  if (NULL != getenv("AMQP_USERNAME"))      { strcpy(amqp_username, getenv("AMQP_USERNAME")); }
-  if (NULL != getenv("AMQP_PASSWORD"))      { strcpy(amqp_password, getenv("AMQP_PASSWORD")); }
-  if (NULL != getenv("AMQP_VHOST"))         { strcpy(amqp_vhost, getenv("AMQP_VHOST")); }
-  if (NULL != getenv("AMQP_EXCHANGE"))      { strcpy(amqp_exchange, getenv("AMQP_EXCHANGE")); }
-  if (NULL != getenv("AMQP_ROUTINGKEY"))    { strcpy(amqp_routingkey, getenv("AMQP_ROUTINGKEY")); }
+  if (NULL != getenv("AMQP_USERNAME"))      { strlcpy(amqp_username, getenv("AMQP_USERNAME"), sizeof(amqp_username)); }
+  if (NULL != getenv("AMQP_PASSWORD"))      { strlcpy(amqp_password, getenv("AMQP_PASSWORD"), sizeof(amqp_password)); }
+  if (NULL != getenv("AMQP_VHOST"))         { strlcpy(amqp_vhost, getenv("AMQP_VHOST"), sizeof(amqp_vhost)); }
+  if (NULL != getenv("AMQP_EXCHANGE"))      { strlcpy(amqp_exchange, getenv("AMQP_EXCHANGE"), sizeof(amqp_exchange)); }
+  if (NULL != getenv("AMQP_ROUTINGKEY"))    { strlcpy(amqp_routingkey, getenv("AMQP_ROUTINGKEY"), sizeof(amqp_routingkey)); }
 
   // overwriting current config with command line options?
   while(1) {
@@ -352,28 +358,29 @@ int main(int argc, char **argv) {
       case 0: // no_argument
         break;
       case 'D':
-        strcpy(serial_device, optarg);
+        strlcpy(serial_device, optarg, sizeof(serial_device));
         break;
       case 'H':
-        strcpy(amqp_hostname, optarg);
+        strlcpy(amqp_hostname, optarg, sizeof(amqp_hostname));
         break;
       case 'p':
         amqp_port = atoi(optarg);
         break;
       case 'U':
-        strcpy(amqp_username, optarg);
+        strlcpy(amqp_username, optarg, sizeof(amqp_username));
         break;
       case 'P':
-        strcpy(amqp_password, optarg);
+        debug_print(1, "WARNING: password supplied on command line; Use AMQP_PASSWORD instead");
+        strlcpy(amqp_password, optarg, sizeof(amqp_password));
         break;
       case 'E':
-        strcpy(amqp_exchange, optarg);
+        strlcpy(amqp_exchange, optarg, sizeof(amqp_exchange));
         break;
       case 'K':
-        strcpy(amqp_routingkey, optarg);
+        strlcpy(amqp_routingkey, optarg, sizeof(amqp_routingkey));
         break;
       case 'V':
-        strcpy(amqp_vhost, optarg);
+        strlcpy(amqp_vhost, optarg, sizeof(amqp_vhost));
         break;
       case 'd':
         debug_level = atoi(optarg);
