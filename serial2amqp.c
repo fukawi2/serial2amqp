@@ -74,6 +74,12 @@
 #define AMQP_NOT_PERSISTENT 1;
 #define AMQP_PERSISTENT 2;
 
+/* maximum number of items in the internal queue between the serial operations
+ * and amqp operations. and "item" is a canonical string of text received via
+ * the serial port
+ */
+#define QUEUE_MAX_ITEMS 32;
+
 // POSIX compliant source
 #define _POSIX_SOURCE 1
 
@@ -193,6 +199,68 @@ void debug_print(int msg_lvl, const char *msg)
 }
 
 
+/******************************************************************************
+ * Ringbuffer/FIFO Queue implementation
+ * http://akomaenablog.blogspot.com.au/2008/03/round-fifo-queue-in-c.html
+ *****************************************************************************/
+int queue_head;
+int queue_tail;
+int queue_items_max;
+int queue_items_avl;
+int queue_lock_intent;
+int queue_locked;
+void **table;
+
+// init queue
+void fifo_init (int size) {
+  queue_head  = 0;
+  queue_tail  = 0;
+  queue_items_avl = 0;
+  queue_items_max = size;
+  table=(void**)malloc(queue_items_max * sizeof(void*));
+}
+
+// free memory
+void fifo_destroy() {
+  int i;
+  if( ! fifo_is_empty() ) {
+    for ( i=queue_tail; i<queue_head; i++ ) {
+      free(table[i]);
+    }
+  }
+  free(table);
+}
+
+// boolean if the queue is empty or not
+int fifo_is_empty() {
+  return(queue_items_avl==0);
+}
+
+// insert element
+int fifo_push(void *next) {
+  debug_print(4, "Pushing onto queue");
+  if ( queue_items_avl == queue_items_max ) {
+    // queue full
+    return(0);
+  }
+
+  table[queue_head]=next;
+  queue_items_avl++;
+  queue_head=(queue_head+1)%queue_items_max;
+  return(1);
+}
+
+// return next element
+void* fifo_unshift() {
+  debug_print(4, "Unshifting from queue");
+  void* get;
+  if (queue_items_avl>0) {
+    get=table[queue_tail];
+    queue_tail=(queue_tail+1)%queue_items_max;
+    queue_items_avl--;
+    return(get);
+  }
+}
 
 /******************************************************************************
  * AMQP FUNCTIONALITY
@@ -250,14 +318,8 @@ void die_on_amqp_error(amqp_rpc_reply_t x, char const *context) {
   exit(1);
 }
 
-
-
-int amqpsend(const char *msg) {
+int amqpsend() {
   int amqp_channel = 1; // TODO: handle dynamic channel number
-
-  // build the message body
-  amqp_bytes_t messagebody;
-  messagebody = amqp_cstring_bytes(msg);
 
   // open a connection to the server
   debug_print(2, "Connecting to AMQP Broker");
@@ -280,26 +342,39 @@ int amqpsend(const char *msg) {
   amqp_channel_open(conn, amqp_channel);
   die_on_amqp_error(amqp_get_rpc_reply(conn), "Opening channel");
 
-  // build the message frame
-  debug_print(3, "Building AMQP Message Frame");
-  amqp_basic_properties_t props;
-  props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG | AMQP_BASIC_DELIVERY_MODE_FLAG;
-  props.content_type = amqp_cstring_bytes("text/plain");
-  props.delivery_mode = AMQP_PERSISTENT;
+  debug_print(2, "Polling queue");
+  while (1) {
+    if ( fifo_is_empty() )
+      continue;  // abort until there's actually something in the queue
 
-  // send the message frame
-  debug_print(2, "Publishing message to exchange/routing key");
-  debug_print(2, amqp_exchange);
-  debug_print(2, amqp_routingkey);
-  die_on_error(amqp_basic_publish(conn,
-                                  amqp_channel,
-                                  amqp_cstring_bytes(amqp_exchange),
-                                  amqp_cstring_bytes(amqp_routingkey),
-                                  0,
-                                  0,
-                                  &props,
-                                  messagebody),
-                "Sending message");
+    // fifo must finally have something; grab it and publish it
+    char *msg = fifo_unshift();
+
+    // build the message body
+    amqp_bytes_t messagebody;
+    messagebody = amqp_cstring_bytes(msg);
+
+    // build the message frame
+    debug_print(3, "Building AMQP Message Frame");
+    amqp_basic_properties_t props;
+    props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG | AMQP_BASIC_DELIVERY_MODE_FLAG;
+    props.content_type = amqp_cstring_bytes("text/plain");
+    props.delivery_mode = AMQP_PERSISTENT;
+
+    // send the message frame
+    debug_print(2, "Publishing message to exchange/routing key");
+    debug_print(2, amqp_exchange);
+    debug_print(2, amqp_routingkey);
+    die_on_error(amqp_basic_publish(conn,
+                                    amqp_channel,
+                                    amqp_cstring_bytes(amqp_exchange),
+                                    amqp_cstring_bytes(amqp_routingkey),
+                                    0,
+                                    0,
+                                    &props,
+                                    messagebody),
+                  "Sending message");
+  }
 
   // cleanup by closing all our connections
   debug_print(4, "Cleaning up AMQP Connection");
@@ -483,6 +558,10 @@ int main(int argc, char **argv) {
   tcflush(fd, TCIFLUSH);
   tcsetattr(fd, TCSANOW, &newtio);
 
+  // initialize the internal ringbuffer/fifo queue
+  int queue_size = QUEUE_MAX_ITEMS;
+  fifo_init(queue_size);
+
   // ready to handle input; daemonize if required
   // refer: http://www.danielhall.me/2010/01/writing-a-daemon-in-c/
   if (0 == foreground_flag) {
@@ -516,7 +595,7 @@ int main(int argc, char **argv) {
   // serial port settings done, now handle input
   debug_print(2, "Begining loop");
   char buf[255];
-  char dbgmsg[300];
+  char dbgmsg[512];
   while (STOP == FALSE) {
     /* read blocks program execution until a line terminating character is
      * input, even if more than 255 chars are input. If the number
@@ -539,8 +618,12 @@ int main(int argc, char **argv) {
     debug_print(1, dbgmsg);
 
     // output just the received data to stdout
-    //printf("%s\n", buf);
-    amqpsend(buf);
+    res = fifo_push(buf);
+    if ( res ) {
+      amqpsend();
+    } else {
+      debug_print(1, "WARNING: fifo queue FULL. Dropped message.");
+    }
 
     // exit if the buffer starts with 'z' (TODO)
     //if (buf[0]=='z') STOP=TRUE;
