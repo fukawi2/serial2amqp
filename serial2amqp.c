@@ -421,7 +421,6 @@ void *thr_amqp_publish() {
  * Serial Port Operations
  *****************************************************************************/
 void signal_handler_IO (int status) {
-  printf("received SIGIO signal.\n");
   waiting_for_io_flag = FALSE;
   pthread_cond_signal( &cond_serialio );
 }         
@@ -549,9 +548,6 @@ void *thr_read_from_serial() {
     pthread_cond_signal( &cond_fifo_queue );
     pthread_mutex_unlock( &mtx_fifo_queue );
 
-    // exit if the buffer starts with 'z' (TODO)
-    //if (buf[0]=='z') STOP=TRUE;
-    //
     waiting_for_io_flag=TRUE;
   }
 
