@@ -96,6 +96,12 @@
 volatile int STOP=FALSE;
 int waiting_for_io_flag=TRUE;
 
+// thread sychronization
+pthread_mutex_t mtx_fifo_queue  = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t  cond_fifo_queue = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t mtx_serialio    = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t  cond_serialio   = PTHREAD_COND_INITIALIZER;
+
 char serial_device[100]     = MODEMDEVICE;
 static int debug_level      = DEBUGLEVEL;
 static int foreground_flag  = 0;
@@ -149,6 +155,9 @@ void signal_callback_handler(int signum)
   // global var to tell loops when to exit so
   // we can finish up gracefully.
   STOP=TRUE;
+
+  // signal the serial IO thread to stop waiting for serial data
+  pthread_cond_signal( &cond_serialio );
 }
 
 
@@ -342,17 +351,19 @@ void *thr_amqp_publish() {
 
   debug_print(1, "AMQP: Ready");
   while (1) {
+    // lock the fifo mutex before checking it
+    pthread_mutex_lock( &mtx_fifo_queue );
     if ( fifo_is_empty() ) {
+      // block until the serial io thread signals us that
+      // it has pushed data into the fifo
+      pthread_cond_wait( &cond_fifo_queue, &mtx_fifo_queue );
+
       // once the fifo queue is empty, then we can
       // gracefully exit this sub if the global 
       // var STOP is true (controlled by the signal
       // handler)
-      if ( STOP==FALSE ) {
-        continue;
-      } else {
-        debug_print(1, "AMQP: Thread Exiting");
+      if ( STOP==TRUE )
         break;
-      }
     }
 
     // fifo must finally have something; grab it and publish it
@@ -382,6 +393,8 @@ void *thr_amqp_publish() {
                                     &props,
                                     messagebody),
                   "Sending message");
+
+    pthread_mutex_unlock( &mtx_fifo_queue );
   }
 
   // cleanup by closing all our connections
@@ -410,6 +423,7 @@ void *thr_amqp_publish() {
 void signal_handler_IO (int status) {
   printf("received SIGIO signal.\n");
   waiting_for_io_flag = FALSE;
+  pthread_cond_signal( &cond_serialio );
 }         
 
 void *thr_read_from_serial() {
@@ -501,6 +515,7 @@ void *thr_read_from_serial() {
   char dbgmsg[512];
   while (STOP == FALSE) {
     if ( waiting_for_io_flag==TRUE ) {
+      pthread_cond_wait( &cond_serialio, &mtx_serialio );
       continue;
     }
     /* read blocks program execution until a line terminating character is
@@ -524,12 +539,15 @@ void *thr_read_from_serial() {
     debug_print(1, dbgmsg);
 
     // output just the received data to stdout
+    pthread_mutex_lock( &mtx_fifo_queue );
     res = fifo_push(buf);
     if ( res ) {
       debug_print(2, "SERIO: Message Queued");
     } else {
       debug_print(1, "SERIO: WARNING: fifo queue FULL. Dropped message.");
     }
+    pthread_cond_signal( &cond_fifo_queue );
+    pthread_mutex_unlock( &mtx_fifo_queue );
 
     // exit if the buffer starts with 'z' (TODO)
     //if (buf[0]=='z') STOP=TRUE;
@@ -540,6 +558,9 @@ void *thr_read_from_serial() {
   // restore the old port settings
   tcsetattr(fd, TCSANOW, &oldtio);
 
+  // signal the AMQP thread that it can exit; we aren't
+  // going to send any more data to the queue
+  pthread_cond_signal( &cond_fifo_queue );
   close(fd);
 
   debug_print(1, "SERIO: Thread Exiting");
