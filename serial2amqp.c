@@ -51,6 +51,7 @@
 #include <signal.h>   // handling signals
 #include <termios.h>  // all serial port functions and constants
 #include <syslog.h>   // logging
+#include <pthread.h>  // threading
 //#include <sys/types.h>
 //#include <sys/stat.h>
 
@@ -93,6 +94,7 @@
 #define TRUE 1
 
 volatile int STOP=FALSE;
+int waiting_for_io_flag=TRUE;
 
 char serial_device[100]     = MODEMDEVICE;
 static int debug_level      = DEBUGLEVEL;
@@ -144,11 +146,9 @@ void signal_callback_handler(int signum)
 {
   fprintf(stderr, "Caught signal %d\n", signum);
 
-  // restore the old port settings
-  tcsetattr(fd, TCSANOW, &oldtio);
-
-  // Terminate program
-  exit(signum);
+  // global var to tell loops when to exit so
+  // we can finish up gracefully.
+  STOP=TRUE;
 }
 
 
@@ -275,8 +275,6 @@ void die_on_error(int x, char const *context) {
   }
 }
 
-
-
 void die_on_amqp_error(amqp_rpc_reply_t x, char const *context) {
   switch (x.reply_type) {
     case AMQP_RESPONSE_NORMAL:
@@ -318,7 +316,7 @@ void die_on_amqp_error(amqp_rpc_reply_t x, char const *context) {
   exit(1);
 }
 
-int amqpsend() {
+void *thr_amqp_publish() {
   int amqp_channel = 1; // TODO: handle dynamic channel number
 
   // open a connection to the server
@@ -344,8 +342,17 @@ int amqpsend() {
 
   debug_print(2, "Polling queue");
   while (1) {
-    if ( fifo_is_empty() )
-      continue;  // abort until there's actually something in the queue
+    if ( fifo_is_empty() ) {
+      // once the fifo queue is empty, then we can
+      // gracefully exit this sub if the global 
+      // var STOP is true (controlled by the signal
+      // handler)
+      if ( STOP==FALSE ) {
+        continue;
+      } else {
+        pthread_exit(0);
+      }
+    }
 
     // fifo must finally have something; grab it and publish it
     char *msg = fifo_unshift();
@@ -391,10 +398,150 @@ int amqpsend() {
       amqp_destroy_connection(conn),
       "Ending connection");
 
-  return 0;
+  pthread_exit(0);
 }
 
 
+/******************************************************************************
+ * Serial Port Operations
+ *****************************************************************************/
+void signal_handler_IO (int status) {
+  printf("received SIGIO signal.\n");
+  waiting_for_io_flag = FALSE;
+}         
+
+void *thr_read_from_serial() {
+  int res;  // throaway value for capturing results of functions
+  struct termios newtio;  // the settings we want for the serial port
+  /*
+   * Open modem device for reading and writing and not as controlling tty
+   * because we don't want to get killed if linenoise sends CTRL-C.
+  */
+  debug_print(1, "Opening serial device:");
+  debug_print(1, serial_device);
+  fd = open(serial_device, O_RDONLY | O_NOCTTY );
+  if (fd < 0) { perror(serial_device); exit(-1); }  // exit if fail to open
+
+  // install the signal handler before making the device asynchronous
+  struct sigaction saio;           /* definition of signal action */
+  saio.sa_handler = signal_handler_IO;
+  //saio.sa_mask = 0;
+  saio.sa_flags = 0;
+  saio.sa_restorer = NULL;
+  sigaction(SIGIO, &saio, NULL);
+  // allow the process to receive SIGIO
+  fcntl(fd, F_SETOWN, getpid());
+  // Make the file descriptor asynchronous (the manual page says only
+  // O_APPEND and O_NONBLOCK, will work with F_SETFL...)
+  fcntl(fd, F_SETFL, FASYNC);
+
+  debug_print(3, "Saving existing serial port settings");
+  tcgetattr(fd, &oldtio);         // save current serial port settings
+  bzero(&newtio, sizeof(newtio)); // clear struct for new port settings
+
+  /*
+   * BAUDRATE: Set bps rate. You could also use cfsetispeed and cfsetospeed.
+   * CRTSCTS : output hardware flow control (only used if the cable has
+   *           all necessary lines. See sect. 7 of Serial-HOWTO)
+   * CS8     : 8n1 (8bit,no parity,1 stopbit)
+   * CLOCAL  : local connection, no modem contol
+   * CREAD   : enable receiving characters
+  */
+  newtio.c_cflag = BAUDRATE | CRTSCTS | CS8 | CLOCAL | CREAD;
+
+  /*
+  IGNPAR  : ignore bytes with parity errors
+  ICRNL   : map CR to NL (otherwise a CR input on the other computer
+            will not terminate input) otherwise make device raw
+  */
+  newtio.c_iflag = IGNPAR | ICRNL;
+
+  // Raw output.
+  newtio.c_oflag = 0;
+
+  /*
+   * ICANON  : enable canonical input
+   * disable all echo functionality, and don't send signals to calling program
+  */
+  newtio.c_lflag = ICANON;
+
+  /*
+   * initialize all control characters
+   * default values can be found in /usr/include/termios.h, and are given
+   * in the comments, but we don't need them here
+  */
+  newtio.c_cc[VINTR]    = 0;  // Ctrl-c
+  newtio.c_cc[VQUIT]    = 0;  // Ctrl-\   */
+  newtio.c_cc[VERASE]   = 0;  // del
+  newtio.c_cc[VKILL]    = 0;  // @
+  newtio.c_cc[VEOF]     = 4;  // Ctrl-d
+  newtio.c_cc[VTIME]    = 0;  // inter-character timer unused
+  newtio.c_cc[VMIN]     = 1;  // blocking read until 1 character arrives
+  newtio.c_cc[VSWTC]    = 0;  // '\0'
+  newtio.c_cc[VSTART]   = 0;  // Ctrl-q
+  newtio.c_cc[VSTOP]    = 0;  // Ctrl-s
+  newtio.c_cc[VSUSP]    = 0;  // Ctrl-z
+  newtio.c_cc[VEOL]     = 0;  // '\0'
+  newtio.c_cc[VREPRINT] = 0;  // Ctrl-r
+  newtio.c_cc[VDISCARD] = 0;  // Ctrl-u
+  newtio.c_cc[VWERASE]  = 0;  // Ctrl-w
+  newtio.c_cc[VLNEXT]   = 0;  // Ctrl-v
+  newtio.c_cc[VEOL2]    = 0;  // '\0'
+
+  // now clean the modem line and activate the settings for the port
+  debug_print(3, "Cleaning line and activating port settings");
+  tcflush(fd, TCIFLUSH);
+  tcsetattr(fd, TCSANOW, &newtio);
+
+  // serial port settings done, now handle input
+  debug_print(2, "Begining loop");
+  char buf[255];
+  char dbgmsg[512];
+  while (STOP == FALSE) {
+    if ( waiting_for_io_flag==TRUE ) {
+      continue;
+    }
+    /* read blocks program execution until a line terminating character is
+     * input, even if more than 255 chars are input. If the number
+     * of characters read is smaller than the number of chars available,
+     * subsequent reads will return the remaining chars. res will be set
+     * to the actual number of characters actually read
+    */
+    res = read(fd, buf, 255);
+
+    // switch the trailing newline for null
+    buf[res-1] = '\0';
+
+    // don't output blank lines
+    if (res-1 < 1) {
+      continue;
+    }
+
+    // show debug info
+    snprintf(dbgmsg, sizeof(dbgmsg), "Recv %d characters: %s", res, buf);
+    debug_print(1, dbgmsg);
+
+    // output just the received data to stdout
+    res = fifo_push(buf);
+    if ( res ) {
+      debug_print(2, "Message Queued");
+    } else {
+      debug_print(1, "WARNING: fifo queue FULL. Dropped message.");
+    }
+
+    // exit if the buffer starts with 'z' (TODO)
+    //if (buf[0]=='z') STOP=TRUE;
+    //
+    waiting_for_io_flag=TRUE;
+  }
+
+  // restore the old port settings
+  tcsetattr(fd, TCSANOW, &oldtio);
+
+  close(fd);
+
+  pthread_exit(0);
+}
 
 /******************************************************************************
  * MAIN
@@ -488,76 +635,7 @@ int main(int argc, char **argv) {
   // validate config
   if (amqp_port < 0)      { bomb(1, "Bad port"); }
   if (amqp_port > 65535)  { bomb(1, "Bad port"); }
-
-  int res;  // throaway value for capturing results of functions
-  struct termios newtio;  // the settings we want for the serial port
-  /*
-   * Open modem device for reading and writing and not as controlling tty
-   * because we don't want to get killed if linenoise sends CTRL-C.
-  */
-  debug_print(1, "Opening serial device:");
-  debug_print(1, serial_device);
-  fd = open(serial_device, O_RDONLY | O_NOCTTY );
-  if (fd < 0) { perror(serial_device); exit(-1); }  // exit if fail to open
-
-  debug_print(3, "Saving existing serial port settings");
-  tcgetattr(fd, &oldtio);         // save current serial port settings
-  bzero(&newtio, sizeof(newtio)); // clear struct for new port settings
-
-  /*
-   * BAUDRATE: Set bps rate. You could also use cfsetispeed and cfsetospeed.
-   * CRTSCTS : output hardware flow control (only used if the cable has
-   *           all necessary lines. See sect. 7 of Serial-HOWTO)
-   * CS8     : 8n1 (8bit,no parity,1 stopbit)
-   * CLOCAL  : local connection, no modem contol
-   * CREAD   : enable receiving characters
-  */
-  newtio.c_cflag = BAUDRATE | CRTSCTS | CS8 | CLOCAL | CREAD;
-
-  /*
-  IGNPAR  : ignore bytes with parity errors
-  ICRNL   : map CR to NL (otherwise a CR input on the other computer
-            will not terminate input) otherwise make device raw
-  */
-  newtio.c_iflag = IGNPAR | ICRNL;
-
-  // Raw output.
-  newtio.c_oflag = 0;
-
-  /*
-   * ICANON  : enable canonical input
-   * disable all echo functionality, and don't send signals to calling program
-  */
-  newtio.c_lflag = ICANON;
-
-  /*
-   * initialize all control characters
-   * default values can be found in /usr/include/termios.h, and are given
-   * in the comments, but we don't need them here
-  */
-  newtio.c_cc[VINTR]    = 0;  // Ctrl-c
-  newtio.c_cc[VQUIT]    = 0;  // Ctrl-\   */
-  newtio.c_cc[VERASE]   = 0;  // del
-  newtio.c_cc[VKILL]    = 0;  // @
-  newtio.c_cc[VEOF]     = 4;  // Ctrl-d
-  newtio.c_cc[VTIME]    = 0;  // inter-character timer unused
-  newtio.c_cc[VMIN]     = 1;  // blocking read until 1 character arrives
-  newtio.c_cc[VSWTC]    = 0;  // '\0'
-  newtio.c_cc[VSTART]   = 0;  // Ctrl-q
-  newtio.c_cc[VSTOP]    = 0;  // Ctrl-s
-  newtio.c_cc[VSUSP]    = 0;  // Ctrl-z
-  newtio.c_cc[VEOL]     = 0;  // '\0'
-  newtio.c_cc[VREPRINT] = 0;  // Ctrl-r
-  newtio.c_cc[VDISCARD] = 0;  // Ctrl-u
-  newtio.c_cc[VWERASE]  = 0;  // Ctrl-w
-  newtio.c_cc[VLNEXT]   = 0;  // Ctrl-v
-  newtio.c_cc[VEOL2]    = 0;  // '\0'
-
-  // now clean the modem line and activate the settings for the port
-  debug_print(3, "Cleaning line and activating port settings");
-  tcflush(fd, TCIFLUSH);
-  tcsetattr(fd, TCSANOW, &newtio);
-
+  
   // initialize the internal ringbuffer/fifo queue
   int queue_size = QUEUE_MAX_ITEMS;
   fifo_init(queue_size);
@@ -592,40 +670,23 @@ int main(int argc, char **argv) {
     close(STDERR_FILENO);
   }
 
-  // serial port settings done, now handle input
-  debug_print(2, "Begining loop");
-  char buf[255];
-  char dbgmsg[512];
-  while (STOP == FALSE) {
-    /* read blocks program execution until a line terminating character is
-     * input, even if more than 255 chars are input. If the number
-     * of characters read is smaller than the number of chars available,
-     * subsequent reads will return the remaining chars. res will be set
-     * to the actual number of characters actually read
-    */
-    res = read(fd, buf, 255);
 
-    // switch the trailing newline for null
-    buf[res-1] = '\0';
+  // Refer: http://www.yolinux.com/TUTORIALS/LinuxTutorialPosixThreads.html
+  pthread_t thread1, thread2;
+  int iret1, iret2;
+  
+  // Create independent threads
+  debug_print(3, "Creating thread for serial port operations");
+  iret1 = pthread_create( &thread1, NULL, &thr_read_from_serial, NULL);
+  debug_print(3, "Creating thread for AMQP operations");
+  iret2 = pthread_create( &thread2, NULL, &thr_amqp_publish, NULL);
 
-    // don't output blank lines
-    if (res-1 < 1) {
-      continue;
-    }
-
-    // show debug info
-    snprintf(dbgmsg, sizeof(dbgmsg), "Recv %d characters: %s", res, buf);
-    debug_print(1, dbgmsg);
-
-    // output just the received data to stdout
-    res = fifo_push(buf);
-    if ( res ) {
-      amqpsend();
-    } else {
-      debug_print(1, "WARNING: fifo queue FULL. Dropped message.");
-    }
-
-    // exit if the buffer starts with 'z' (TODO)
-    //if (buf[0]=='z') STOP=TRUE;
-  }
+  /* Wait till threads are complete before main continues. Unless we
+   * wait we run the risk of executing an exit which will terminate
+   * the process and all threads before the threads have completed.
+   */
+  debug_print(3, "Joining serial port operations thread");
+  pthread_join( thread1, NULL);
+  debug_print(3, "Joining AMQP operations thread");
+  pthread_join( thread2, NULL);
 }
