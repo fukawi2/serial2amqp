@@ -320,14 +320,14 @@ void *thr_amqp_publish() {
   int amqp_channel = 1; // TODO: handle dynamic channel number
 
   // open a connection to the server
-  debug_print(2, "Connecting to AMQP Broker");
+  debug_print(2, "AMQP: Connecting to broker");
   amqp_connection_state_t conn;
   int sockfd;
   conn = amqp_new_connection();
   die_on_error(sockfd = amqp_open_socket(amqp_hostname, amqp_port), "Opening socket");
 
   // authenticate
-  debug_print(2, "Authenticating");
+  debug_print(2, "AMQP: Authenticating");
   amqp_set_sockfd(conn, sockfd);
   die_on_amqp_error(
       amqp_login(
@@ -336,11 +336,11 @@ void *thr_amqp_publish() {
       "Authenticating");
 
   // open a channel
-  debug_print(3, "Opening a channel");
+  debug_print(3, "AMQP: Opening a channel");
   amqp_channel_open(conn, amqp_channel);
   die_on_amqp_error(amqp_get_rpc_reply(conn), "Opening channel");
 
-  debug_print(1, "AMQP Thread Ready");
+  debug_print(1, "AMQP: Ready");
   while (1) {
     if ( fifo_is_empty() ) {
       // once the fifo queue is empty, then we can
@@ -350,8 +350,8 @@ void *thr_amqp_publish() {
       if ( STOP==FALSE ) {
         continue;
       } else {
-        debug_print(1, "AMQP Thread Exiting");
-        pthread_exit(0);
+        debug_print(1, "AMQP: Thread Exiting");
+        break;
       }
     }
 
@@ -363,14 +363,14 @@ void *thr_amqp_publish() {
     messagebody = amqp_cstring_bytes(msg);
 
     // build the message frame
-    debug_print(3, "Building AMQP Message Frame");
+    debug_print(3, "AMQP: Building message frame");
     amqp_basic_properties_t props;
     props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG | AMQP_BASIC_DELIVERY_MODE_FLAG;
     props.content_type = amqp_cstring_bytes("text/plain");
     props.delivery_mode = AMQP_PERSISTENT;
 
     // send the message frame
-    debug_print(2, "Publishing message to exchange/routing key");
+    debug_print(2, "AMQP: Publishing message to exchange/routing key");
     debug_print(2, amqp_exchange);
     debug_print(2, amqp_routingkey);
     die_on_error(amqp_basic_publish(conn,
@@ -385,20 +385,21 @@ void *thr_amqp_publish() {
   }
 
   // cleanup by closing all our connections
-  debug_print(4, "Cleaning up AMQP Connection");
-  debug_print(5, "Closing channel");
+  debug_print(4, "AMQP: Cleaning up connection");
+  debug_print(5, "AMQP: Closing channel");
   die_on_amqp_error(
       amqp_channel_close(conn, amqp_channel, AMQP_REPLY_SUCCESS),
       "Closing channel");
-  debug_print(5, "Closing connection");
+  debug_print(5, "AMQP: Closing connection");
   die_on_amqp_error(
       amqp_connection_close(conn, AMQP_REPLY_SUCCESS),
       "Closing connection");
-  debug_print(5, "Ending connection");
+  debug_print(5, "AMQP: Ending connection");
   die_on_error(
       amqp_destroy_connection(conn),
       "Ending connection");
 
+  debug_print(1, "AMQP: Thread Exiting");
   pthread_exit(0);
 }
 
@@ -418,7 +419,7 @@ void *thr_read_from_serial() {
    * Open modem device for reading and writing and not as controlling tty
    * because we don't want to get killed if linenoise sends CTRL-C.
   */
-  debug_print(2, "Opening serial device:");
+  debug_print(2, "SERIO: Opening serial device:");
   debug_print(2, serial_device);
   fd = open(serial_device, O_RDONLY | O_NOCTTY );
   if (fd < 0) { perror(serial_device); exit(-1); }  // exit if fail to open
@@ -436,7 +437,7 @@ void *thr_read_from_serial() {
   // O_APPEND and O_NONBLOCK, will work with F_SETFL...)
   fcntl(fd, F_SETFL, FASYNC);
 
-  debug_print(3, "Saving existing serial port settings");
+  debug_print(3, "SERIO: Saving existing serial port settings");
   tcgetattr(fd, &oldtio);         // save current serial port settings
   bzero(&newtio, sizeof(newtio)); // clear struct for new port settings
 
@@ -490,12 +491,12 @@ void *thr_read_from_serial() {
   newtio.c_cc[VEOL2]    = 0;  // '\0'
 
   // now clean the modem line and activate the settings for the port
-  debug_print(3, "Cleaning line and activating port settings");
+  debug_print(3, "SERIO: Cleaning line and activating port settings");
   tcflush(fd, TCIFLUSH);
   tcsetattr(fd, TCSANOW, &newtio);
 
   // serial port settings done, now handle input
-  debug_print(1, "Serial Thread Ready");
+  debug_print(1, "SERIO: Thread Ready");
   char buf[255];
   char dbgmsg[512];
   while (STOP == FALSE) {
@@ -519,15 +520,15 @@ void *thr_read_from_serial() {
     }
 
     // show debug info
-    snprintf(dbgmsg, sizeof(dbgmsg), "Recv %d characters: %s", res, buf);
+    snprintf(dbgmsg, sizeof(dbgmsg), "SERIO: Recv %d characters: %s", res, buf);
     debug_print(1, dbgmsg);
 
     // output just the received data to stdout
     res = fifo_push(buf);
     if ( res ) {
-      debug_print(2, "Message Queued");
+      debug_print(2, "SERIO: Message Queued");
     } else {
-      debug_print(1, "WARNING: fifo queue FULL. Dropped message.");
+      debug_print(1, "SERIO: WARNING: fifo queue FULL. Dropped message.");
     }
 
     // exit if the buffer starts with 'z' (TODO)
@@ -541,7 +542,7 @@ void *thr_read_from_serial() {
 
   close(fd);
 
-  debug_print(1, "Serial Thread Exiting");
+  debug_print(1, "SERIO: Thread Exiting");
   pthread_exit(0);
 }
 
@@ -678,9 +679,9 @@ int main(int argc, char **argv) {
   int iret1, iret2;
   
   // Create independent threads
-  debug_print(3, "Creating thread for serial port operations");
+  debug_print(3, "Creating SERIO thread");
   iret1 = pthread_create( &thread1, NULL, &thr_read_from_serial, NULL);
-  debug_print(3, "Creating thread for AMQP operations");
+  debug_print(3, "Creating AMQP thread");
   iret2 = pthread_create( &thread2, NULL, &thr_amqp_publish, NULL);
 
   /* Wait till threads are complete before main continues. Unless we
