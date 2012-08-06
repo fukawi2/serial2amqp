@@ -340,7 +340,7 @@ void *thr_amqp_publish() {
   amqp_channel_open(conn, amqp_channel);
   die_on_amqp_error(amqp_get_rpc_reply(conn), "Opening channel");
 
-  debug_print(2, "Polling queue");
+  debug_print(1, "AMQP Thread Ready");
   while (1) {
     if ( fifo_is_empty() ) {
       // once the fifo queue is empty, then we can
@@ -350,6 +350,7 @@ void *thr_amqp_publish() {
       if ( STOP==FALSE ) {
         continue;
       } else {
+        debug_print(1, "AMQP Thread Exiting");
         pthread_exit(0);
       }
     }
@@ -417,8 +418,8 @@ void *thr_read_from_serial() {
    * Open modem device for reading and writing and not as controlling tty
    * because we don't want to get killed if linenoise sends CTRL-C.
   */
-  debug_print(1, "Opening serial device:");
-  debug_print(1, serial_device);
+  debug_print(2, "Opening serial device:");
+  debug_print(2, serial_device);
   fd = open(serial_device, O_RDONLY | O_NOCTTY );
   if (fd < 0) { perror(serial_device); exit(-1); }  // exit if fail to open
 
@@ -494,7 +495,7 @@ void *thr_read_from_serial() {
   tcsetattr(fd, TCSANOW, &newtio);
 
   // serial port settings done, now handle input
-  debug_print(2, "Begining loop");
+  debug_print(1, "Serial Thread Ready");
   char buf[255];
   char dbgmsg[512];
   while (STOP == FALSE) {
@@ -540,6 +541,7 @@ void *thr_read_from_serial() {
 
   close(fd);
 
+  debug_print(1, "Serial Thread Exiting");
   pthread_exit(0);
 }
 
