@@ -356,17 +356,20 @@ void *thr_amqp_publish() {
     if ( fifo_is_empty() ) {
       // block until the serial io thread signals us that
       // it has pushed data into the fifo
+      debug_print(6, "AMQP: fifo queue empty; unlocking mutex and issuing pthread_cond_wait");
       pthread_cond_wait( &cond_fifo_queue, &mtx_fifo_queue );
 
-      // once the fifo queue is empty, then we can
-      // gracefully exit this sub if the global 
-      // var STOP is true (controlled by the signal
-      // handler)
+      // once the fifo queue is empty, then we can gracefully exit this sub if
+      // the global var STOP is true (controlled by the signal handler)
+      // this check needs to be after the pthread_cond_wait. if it is before,
+      // then when the signal handler signals us, we miss this check and go on
+      // to try and unshift the (empty) fifo queue.
       if ( STOP==TRUE )
         break;
     }
 
     // fifo must finally have something; grab it and publish it
+    debug_print(5, "AMQP: fifo queue has something (I hope); unshifting item");
     char *msg = fifo_unshift();
 
     // build the message body
@@ -421,6 +424,7 @@ void *thr_amqp_publish() {
  * Serial Port Operations
  *****************************************************************************/
 void signal_handler_IO (int status) {
+  debug_print(5, "SIGIO: Setting waiting_for_io_flag = false and Signalling cond_serialio");
   waiting_for_io_flag = FALSE;
   pthread_cond_signal( &cond_serialio );
 }         
@@ -514,6 +518,7 @@ void *thr_read_from_serial() {
   char dbgmsg[512];
   while (STOP == FALSE) {
     if ( waiting_for_io_flag==TRUE ) {
+      debug_print(6, "SERIO: Waiting for IO; issuing pthread_cond_wait");
       pthread_cond_wait( &cond_serialio, &mtx_serialio );
       continue;
     }
