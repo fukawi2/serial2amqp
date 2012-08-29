@@ -515,7 +515,7 @@ void *thr_read_from_serial() {
   // serial port settings done, now handle input
   debug_print(1, "SERIO: Thread Ready");
   char buf[255];
-  char dbgmsg[512];
+  char dbgmsg[1024];
   while (STOP == FALSE) {
     if ( waiting_for_io_flag==TRUE ) {
       debug_print(6, "SERIO: Waiting for IO; issuing pthread_cond_wait");
@@ -528,7 +528,7 @@ void *thr_read_from_serial() {
      * subsequent reads will return the remaining chars. res will be set
      * to the actual number of characters actually read
     */
-    res = read(fd, buf, 255);
+    res = read(fd, buf, 512);
 
     // switch the trailing newline for null
     buf[res-1] = '\0';
