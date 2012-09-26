@@ -60,6 +60,7 @@
 
 // baudrate settings defined in <asm/termbits.h> (included by <termios.h>)
 #define BAUDRATE B38400
+//#define BAUDRATE B9600
 
 // default configuration constants
 #define MODEMDEVICE "/dev/ttyS0"
