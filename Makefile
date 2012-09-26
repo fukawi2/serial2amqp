@@ -17,7 +17,7 @@ uninstall:
 	rm -f $(SERIAL2AMQP_INSTALLROOT)/serial2amqp
 
 serial2amqp: serial2amqp.c
-	gcc -lpthread -o bin/serial2amqp serial2amqp.c -I$(RABBITMQCHOME)/librabbitmq $(RABBITMQCHOME)/librabbitmq/.libs/librabbitmq.so
+	gcc -g -lpthread -o bin/serial2amqp serial2amqp.c -I$(RABBITMQCHOME)/librabbitmq $(RABBITMQCHOME)/librabbitmq/.libs/librabbitmq.so
 
 clean:
 	rm -f bin/*
