@@ -538,6 +538,8 @@ void *thr_read_from_serial() {
 
     // don't output blank lines
     if (res-1 < 1) {
+      pthread_mutex_unlock( &mtx_fifo_queue );
+      waiting_for_io_flag=TRUE;
       continue;
     }
 
