@@ -52,6 +52,7 @@
 #include <termios.h>  // all serial port functions and constants
 #include <syslog.h>   // logging
 #include <pthread.h>  // threading
+#include <time.h>     // gmtime for timestamping msgs
 //#include <sys/types.h>
 //#include <sys/stat.h>
 
@@ -517,6 +518,7 @@ void *thr_read_from_serial() {
   debug_print(1, "SERIO: Thread Ready");
   char buf[255];
   char dbgmsg[1024];
+  char publish_buffer[1024];
   while (STOP == FALSE) {
     if ( waiting_for_io_flag==TRUE ) {
       debug_print(6, "SERIO: Waiting for IO; issuing pthread_cond_wait");
@@ -539,13 +541,27 @@ void *thr_read_from_serial() {
       continue;
     }
 
+    // prepend a gmt timestamp to the msg before we push it onto the
+    // fifo stack for amqp publishing
+    time_t    now;
+    struct tm ts;
+    char      tz[80];
+    time(&now);
+    ts = *localtime(&now);
+    strftime(tz, sizeof(tz), "%Y-%m-%d %H:%M:%S%z;", &ts); // the ; is the delimiter for the published msg
+
+    // build the buffer that we want to publish (with epoch prepended)
+    publish_buffer[0] = '\0';
+    strncat(publish_buffer, tz, sizeof(publish_buffer));
+    strncat(publish_buffer, buf, sizeof(publish_buffer));
+
     // show debug info
-    snprintf(dbgmsg, sizeof(dbgmsg), "SERIO: Recv %d characters: %s", res, buf);
+    snprintf(dbgmsg, sizeof(dbgmsg), "SERIO: Recv %d characters: %s", res, publish_buffer);
     debug_print(1, dbgmsg);
 
     // output just the received data to stdout
     pthread_mutex_lock( &mtx_fifo_queue );
-    res = fifo_push(buf);
+    res = fifo_push(publish_buffer);
     if ( res ) {
       debug_print(2, "SERIO: Message Queued");
     } else {
