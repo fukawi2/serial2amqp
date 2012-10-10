@@ -516,7 +516,7 @@ void *thr_read_from_serial() {
 
   // serial port settings done, now handle input
   debug_print(1, "SERIO: Thread Ready");
-  char buf[255];
+  char buf[1024];
   char dbgmsg[1024];
   char publish_buffer[1024];
   while (STOP == FALSE) {
@@ -526,12 +526,12 @@ void *thr_read_from_serial() {
       continue;
     }
     /* read blocks program execution until a line terminating character is
-     * input, even if more than 255 chars are input. If the number
+     * input, even if more than X chars are input. If the number
      * of characters read is smaller than the number of chars available,
      * subsequent reads will return the remaining chars. res will be set
      * to the actual number of characters actually read
     */
-    res = read(fd, buf, 512);
+    res = read(fd, buf, sizeof(buf));
 
     // switch the trailing newline for null
     buf[res-1] = '\0';
