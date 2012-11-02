@@ -51,8 +51,6 @@
 #include <signal.h>   // handling signals
 #include <termios.h>  // all serial port functions and constants
 #include <syslog.h>   // logging
-#include <pthread.h>  // threading
-#include <time.h>     // gmtime for timestamping msgs
 //#include <sys/types.h>
 //#include <sys/stat.h>
 
@@ -61,7 +59,6 @@
 
 // baudrate settings defined in <asm/termbits.h> (included by <termios.h>)
 #define BAUDRATE B38400
-//#define BAUDRATE B9600
 
 // default configuration constants
 #define MODEMDEVICE "/dev/ttyS0"
@@ -77,12 +74,6 @@
 #define AMQP_NOT_PERSISTENT 1;
 #define AMQP_PERSISTENT 2;
 
-/* maximum number of items in the internal queue between the serial operations
- * and amqp operations. and "item" is a canonical string of text received via
- * the serial port
- */
-#define QUEUE_MAX_ITEMS 32;
-
 // POSIX compliant source
 #define _POSIX_SOURCE 1
 
@@ -96,13 +87,6 @@
 #define TRUE 1
 
 volatile int STOP=FALSE;
-int waiting_for_io_flag=TRUE;
-
-// thread sychronization
-pthread_mutex_t mtx_fifo_queue  = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t  cond_fifo_queue = PTHREAD_COND_INITIALIZER;
-pthread_mutex_t mtx_serialio    = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t  cond_serialio   = PTHREAD_COND_INITIALIZER;
 
 char serial_device[100]     = MODEMDEVICE;
 static int debug_level      = DEBUGLEVEL;
@@ -154,12 +138,11 @@ void signal_callback_handler(int signum)
 {
   fprintf(stderr, "Caught signal %d\n", signum);
 
-  // global var to tell loops when to exit so
-  // we can finish up gracefully.
-  STOP=TRUE;
+  // restore the old port settings
+  tcsetattr(fd, TCSANOW, &oldtio);
 
-  // signal the serial IO thread to stop waiting for serial data
-  pthread_cond_signal( &cond_serialio );
+  // Terminate program
+  exit(signum);
 }
 
 
@@ -210,68 +193,6 @@ void debug_print(int msg_lvl, const char *msg)
 }
 
 
-/******************************************************************************
- * Ringbuffer/FIFO Queue implementation
- * http://akomaenablog.blogspot.com.au/2008/03/round-fifo-queue-in-c.html
- *****************************************************************************/
-int queue_head;
-int queue_tail;
-int queue_items_max;
-int queue_items_avl;
-int queue_lock_intent;
-int queue_locked;
-void **table;
-
-// init queue
-void fifo_init (int size) {
-  queue_head  = 0;
-  queue_tail  = 0;
-  queue_items_avl = 0;
-  queue_items_max = size;
-  table=(void**)malloc(queue_items_max * sizeof(void*));
-}
-
-// free memory
-void fifo_destroy() {
-  int i;
-  if( ! fifo_is_empty() ) {
-    for ( i=queue_tail; i<queue_head; i++ ) {
-      free(table[i]);
-    }
-  }
-  free(table);
-}
-
-// boolean if the queue is empty or not
-int fifo_is_empty() {
-  return(queue_items_avl==0);
-}
-
-// insert element
-int fifo_push(void *next) {
-  debug_print(4, "Pushing onto queue");
-  if ( queue_items_avl == queue_items_max ) {
-    // queue full
-    return(0);
-  }
-
-  table[queue_head]=next;
-  queue_items_avl++;
-  queue_head=(queue_head+1)%queue_items_max;
-  return(1);
-}
-
-// return next element
-void* fifo_unshift() {
-  debug_print(4, "Unshifting from queue");
-  void* get;
-  if (queue_items_avl>0) {
-    get=table[queue_tail];
-    queue_tail=(queue_tail+1)%queue_items_max;
-    queue_items_avl--;
-    return(get);
-  }
-}
 
 /******************************************************************************
  * AMQP FUNCTIONALITY
@@ -285,6 +206,8 @@ void die_on_error(int x, char const *context) {
     exit(1);
   }
 }
+
+
 
 void die_on_amqp_error(amqp_rpc_reply_t x, char const *context) {
   switch (x.reply_type) {
@@ -327,18 +250,24 @@ void die_on_amqp_error(amqp_rpc_reply_t x, char const *context) {
   exit(1);
 }
 
-void *thr_amqp_publish() {
+
+
+int amqpsend(const char *msg) {
   int amqp_channel = 1; // TODO: handle dynamic channel number
 
+  // build the message body
+  amqp_bytes_t messagebody;
+  messagebody = amqp_cstring_bytes(msg);
+
   // open a connection to the server
-  debug_print(2, "AMQP: Connecting to broker");
+  debug_print(2, "Connecting to AMQP Broker");
   amqp_connection_state_t conn;
   int sockfd;
   conn = amqp_new_connection();
   die_on_error(sockfd = amqp_open_socket(amqp_hostname, amqp_port), "Opening socket");
 
   // authenticate
-  debug_print(2, "AMQP: Authenticating");
+  debug_print(2, "Authenticating");
   amqp_set_sockfd(conn, sockfd);
   die_on_amqp_error(
       amqp_login(
@@ -347,245 +276,50 @@ void *thr_amqp_publish() {
       "Authenticating");
 
   // open a channel
-  debug_print(3, "AMQP: Opening a channel");
+  debug_print(3, "Opening a channel");
   amqp_channel_open(conn, amqp_channel);
   die_on_amqp_error(amqp_get_rpc_reply(conn), "Opening channel");
 
-  debug_print(1, "AMQP: Ready");
-  while (1) {
-    // lock the fifo mutex before checking it
-    pthread_mutex_lock( &mtx_fifo_queue );
-    if ( fifo_is_empty() ) {
-      // block until the serial io thread signals us that
-      // it has pushed data into the fifo
-      debug_print(6, "AMQP: fifo queue empty; unlocking mutex and issuing pthread_cond_wait");
-      pthread_cond_wait( &cond_fifo_queue, &mtx_fifo_queue );
+  // build the message frame
+  debug_print(3, "Building AMQP Message Frame");
+  amqp_basic_properties_t props;
+  props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG | AMQP_BASIC_DELIVERY_MODE_FLAG;
+  props.content_type = amqp_cstring_bytes("text/plain");
+  props.delivery_mode = AMQP_PERSISTENT;
 
-      // once the fifo queue is empty, then we can gracefully exit this sub if
-      // the global var STOP is true (controlled by the signal handler)
-      // this check needs to be after the pthread_cond_wait. if it is before,
-      // then when the signal handler signals us, we miss this check and go on
-      // to try and unshift the (empty) fifo queue.
-      if ( STOP==TRUE )
-        break;
-    }
-
-    // fifo must finally have something; grab it and publish it
-    debug_print(5, "AMQP: fifo queue has something (I hope); unshifting item");
-    char *msg = fifo_unshift();
-
-    // build the message body
-    amqp_bytes_t messagebody;
-    messagebody = amqp_cstring_bytes(msg);
-
-    // build the message frame
-    debug_print(3, "AMQP: Building message frame");
-    amqp_basic_properties_t props;
-    props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG | AMQP_BASIC_DELIVERY_MODE_FLAG;
-    props.content_type = amqp_cstring_bytes("text/plain");
-    props.delivery_mode = AMQP_PERSISTENT;
-
-    // send the message frame
-    debug_print(2, "AMQP: Publishing message to exchange/routing key");
-    debug_print(2, amqp_exchange);
-    debug_print(2, amqp_routingkey);
-    die_on_error(amqp_basic_publish(conn,
-                                    amqp_channel,
-                                    amqp_cstring_bytes(amqp_exchange),
-                                    amqp_cstring_bytes(amqp_routingkey),
-                                    0,
-                                    0,
-                                    &props,
-                                    messagebody),
-                  "Sending message");
-
-    pthread_mutex_unlock( &mtx_fifo_queue );
-  }
+  // send the message frame
+  debug_print(2, "Publishing message to exchange/routing key");
+  debug_print(2, amqp_exchange);
+  debug_print(2, amqp_routingkey);
+  die_on_error(amqp_basic_publish(conn,
+                                  amqp_channel,
+                                  amqp_cstring_bytes(amqp_exchange),
+                                  amqp_cstring_bytes(amqp_routingkey),
+                                  0,
+                                  0,
+                                  &props,
+                                  messagebody),
+                "Sending message");
 
   // cleanup by closing all our connections
-  debug_print(4, "AMQP: Cleaning up connection");
-  debug_print(5, "AMQP: Closing channel");
+  debug_print(4, "Cleaning up AMQP Connection");
+  debug_print(5, "Closing channel");
   die_on_amqp_error(
       amqp_channel_close(conn, amqp_channel, AMQP_REPLY_SUCCESS),
       "Closing channel");
-  debug_print(5, "AMQP: Closing connection");
+  debug_print(5, "Closing connection");
   die_on_amqp_error(
       amqp_connection_close(conn, AMQP_REPLY_SUCCESS),
       "Closing connection");
-  debug_print(5, "AMQP: Ending connection");
+  debug_print(5, "Ending connection");
   die_on_error(
       amqp_destroy_connection(conn),
       "Ending connection");
 
-  debug_print(1, "AMQP: Thread Exiting");
-  pthread_exit(0);
+  return 0;
 }
 
 
-/******************************************************************************
- * Serial Port Operations
- *****************************************************************************/
-void signal_handler_IO (int status) {
-  debug_print(5, "SIGIO: Setting waiting_for_io_flag = false and Signalling cond_serialio");
-  waiting_for_io_flag = FALSE;
-  pthread_cond_signal( &cond_serialio );
-}         
-
-void *thr_read_from_serial() {
-  int res;  // throaway value for capturing results of functions
-  struct termios newtio;  // the settings we want for the serial port
-  /*
-   * Open modem device for reading and writing and not as controlling tty
-   * because we don't want to get killed if linenoise sends CTRL-C.
-  */
-  debug_print(2, "SERIO: Opening serial device:");
-  debug_print(2, serial_device);
-  fd = open(serial_device, O_RDONLY | O_NOCTTY );
-  if (fd < 0) { perror(serial_device); exit(-1); }  // exit if fail to open
-
-  // install the signal handler before making the device asynchronous
-  struct sigaction saio;           /* definition of signal action */
-  saio.sa_handler = signal_handler_IO;
-  //saio.sa_mask = 0;
-  saio.sa_flags = 0;
-  saio.sa_restorer = NULL;
-  sigaction(SIGIO, &saio, NULL);
-  // allow the process to receive SIGIO
-  fcntl(fd, F_SETOWN, getpid());
-  // Make the file descriptor asynchronous (the manual page says only
-  // O_APPEND and O_NONBLOCK, will work with F_SETFL...)
-  fcntl(fd, F_SETFL, FASYNC);
-
-  debug_print(3, "SERIO: Saving existing serial port settings");
-  tcgetattr(fd, &oldtio);         // save current serial port settings
-  bzero(&newtio, sizeof(newtio)); // clear struct for new port settings
-
-  /*
-   * BAUDRATE: Set bps rate. You could also use cfsetispeed and cfsetospeed.
-   * CRTSCTS : output hardware flow control (only used if the cable has
-   *           all necessary lines. See sect. 7 of Serial-HOWTO)
-   * CS8     : 8n1 (8bit,no parity,1 stopbit)
-   * CLOCAL  : local connection, no modem contol
-   * CREAD   : enable receiving characters
-  */
-  newtio.c_cflag = BAUDRATE | CRTSCTS | CS8 | CLOCAL | CREAD;
-
-  /*
-  IGNPAR  : ignore bytes with parity errors
-  ICRNL   : map CR to NL (otherwise a CR input on the other computer
-            will not terminate input) otherwise make device raw
-  */
-  newtio.c_iflag = IGNPAR | ICRNL;
-
-  // Raw output.
-  newtio.c_oflag = 0;
-
-  /*
-   * ICANON  : enable canonical input
-   * disable all echo functionality, and don't send signals to calling program
-  */
-  newtio.c_lflag = ICANON;
-
-  /*
-   * initialize all control characters
-   * default values can be found in /usr/include/termios.h, and are given
-   * in the comments, but we don't need them here
-  */
-  newtio.c_cc[VINTR]    = 0;  // Ctrl-c
-  newtio.c_cc[VQUIT]    = 0;  // Ctrl-\   */
-  newtio.c_cc[VERASE]   = 0;  // del
-  newtio.c_cc[VKILL]    = 0;  // @
-  newtio.c_cc[VEOF]     = 4;  // Ctrl-d
-  newtio.c_cc[VTIME]    = 0;  // inter-character timer unused
-  newtio.c_cc[VMIN]     = 1;  // blocking read until 1 character arrives
-  newtio.c_cc[VSWTC]    = 0;  // '\0'
-  newtio.c_cc[VSTART]   = 0;  // Ctrl-q
-  newtio.c_cc[VSTOP]    = 0;  // Ctrl-s
-  newtio.c_cc[VSUSP]    = 0;  // Ctrl-z
-  newtio.c_cc[VEOL]     = 0;  // '\0'
-  newtio.c_cc[VREPRINT] = 0;  // Ctrl-r
-  newtio.c_cc[VDISCARD] = 0;  // Ctrl-u
-  newtio.c_cc[VWERASE]  = 0;  // Ctrl-w
-  newtio.c_cc[VLNEXT]   = 0;  // Ctrl-v
-  newtio.c_cc[VEOL2]    = 0;  // '\0'
-
-  // now clean the modem line and activate the settings for the port
-  debug_print(3, "SERIO: Cleaning line and activating port settings");
-  tcflush(fd, TCIFLUSH);
-  tcsetattr(fd, TCSANOW, &newtio);
-
-  // serial port settings done, now handle input
-  debug_print(1, "SERIO: Thread Ready");
-  char buf[1024];
-  char dbgmsg[1024];
-  char publish_buffer[1024];
-  while (STOP == FALSE) {
-    if ( waiting_for_io_flag==TRUE ) {
-      debug_print(6, "SERIO: Waiting for IO; issuing pthread_cond_wait");
-      pthread_cond_wait( &cond_serialio, &mtx_serialio );
-      continue;
-    }
-    /* read blocks program execution until a line terminating character is
-     * input, even if more than X chars are input. If the number
-     * of characters read is smaller than the number of chars available,
-     * subsequent reads will return the remaining chars. res will be set
-     * to the actual number of characters actually read
-    */
-    res = read(fd, buf, sizeof(buf));
-
-    // switch the trailing newline for null
-    buf[res-1] = '\0';
-
-    // don't output blank lines
-    if (res-1 < 1) {
-      pthread_mutex_unlock( &mtx_fifo_queue );
-      waiting_for_io_flag=TRUE;
-      continue;
-    }
-
-    // prepend a gmt timestamp to the msg before we push it onto the
-    // fifo stack for amqp publishing
-    time_t    now;
-    struct tm ts;
-    char      tz[80];
-    time(&now);
-    ts = *localtime(&now);
-    strftime(tz, sizeof(tz), "%Y-%m-%d %H:%M:%S%z;", &ts); // the ; is the delimiter for the published msg
-
-    // build the buffer that we want to publish (with epoch prepended)
-    publish_buffer[0] = '\0';
-    strncat(publish_buffer, tz, sizeof(publish_buffer));
-    strncat(publish_buffer, buf, sizeof(publish_buffer));
-
-    // show debug info
-    snprintf(dbgmsg, sizeof(dbgmsg), "SERIO: Recv %d characters: %s", res, publish_buffer);
-    debug_print(1, dbgmsg);
-
-    // output just the received data to stdout
-    pthread_mutex_lock( &mtx_fifo_queue );
-    res = fifo_push(publish_buffer);
-    if ( res ) {
-      debug_print(2, "SERIO: Message Queued");
-    } else {
-      debug_print(1, "SERIO: WARNING: fifo queue FULL. Dropped message.");
-    }
-    pthread_cond_signal( &cond_fifo_queue );
-    pthread_mutex_unlock( &mtx_fifo_queue );
-
-    waiting_for_io_flag=TRUE;
-  }
-
-  // restore the old port settings
-  tcsetattr(fd, TCSANOW, &oldtio);
-
-  // signal the AMQP thread that it can exit; we aren't
-  // going to send any more data to the queue
-  pthread_cond_signal( &cond_fifo_queue );
-  close(fd);
-
-  debug_print(1, "SERIO: Thread Exiting");
-  pthread_exit(0);
-}
 
 /******************************************************************************
  * MAIN
@@ -679,10 +413,75 @@ int main(int argc, char **argv) {
   // validate config
   if (amqp_port < 0)      { bomb(1, "Bad port"); }
   if (amqp_port > 65535)  { bomb(1, "Bad port"); }
-  
-  // initialize the internal ringbuffer/fifo queue
-  int queue_size = QUEUE_MAX_ITEMS;
-  fifo_init(queue_size);
+
+  int res;  // throaway value for capturing results of functions
+  struct termios newtio;  // the settings we want for the serial port
+  /*
+   * Open modem device for reading and writing and not as controlling tty
+   * because we don't want to get killed if linenoise sends CTRL-C.
+  */
+  debug_print(1, "Opening serial device:");
+  debug_print(1, serial_device);
+  fd = open(serial_device, O_RDONLY | O_NOCTTY );
+  if (fd < 0) { perror(serial_device); exit(-1); }  // exit if fail to open
+
+  debug_print(3, "Saving existing serial port settings");
+  tcgetattr(fd, &oldtio);         // save current serial port settings
+  bzero(&newtio, sizeof(newtio)); // clear struct for new port settings
+
+  /*
+   * BAUDRATE: Set bps rate. You could also use cfsetispeed and cfsetospeed.
+   * CRTSCTS : output hardware flow control (only used if the cable has
+   *           all necessary lines. See sect. 7 of Serial-HOWTO)
+   * CS8     : 8n1 (8bit,no parity,1 stopbit)
+   * CLOCAL  : local connection, no modem contol
+   * CREAD   : enable receiving characters
+  */
+  newtio.c_cflag = BAUDRATE | CRTSCTS | CS8 | CLOCAL | CREAD;
+
+  /*
+  IGNPAR  : ignore bytes with parity errors
+  ICRNL   : map CR to NL (otherwise a CR input on the other computer
+            will not terminate input) otherwise make device raw
+  */
+  newtio.c_iflag = IGNPAR | ICRNL;
+
+  // Raw output.
+  newtio.c_oflag = 0;
+
+  /*
+   * ICANON  : enable canonical input
+   * disable all echo functionality, and don't send signals to calling program
+  */
+  newtio.c_lflag = ICANON;
+
+  /*
+   * initialize all control characters
+   * default values can be found in /usr/include/termios.h, and are given
+   * in the comments, but we don't need them here
+  */
+  newtio.c_cc[VINTR]    = 0;  // Ctrl-c
+  newtio.c_cc[VQUIT]    = 0;  // Ctrl-\   */
+  newtio.c_cc[VERASE]   = 0;  // del
+  newtio.c_cc[VKILL]    = 0;  // @
+  newtio.c_cc[VEOF]     = 4;  // Ctrl-d
+  newtio.c_cc[VTIME]    = 0;  // inter-character timer unused
+  newtio.c_cc[VMIN]     = 1;  // blocking read until 1 character arrives
+  newtio.c_cc[VSWTC]    = 0;  // '\0'
+  newtio.c_cc[VSTART]   = 0;  // Ctrl-q
+  newtio.c_cc[VSTOP]    = 0;  // Ctrl-s
+  newtio.c_cc[VSUSP]    = 0;  // Ctrl-z
+  newtio.c_cc[VEOL]     = 0;  // '\0'
+  newtio.c_cc[VREPRINT] = 0;  // Ctrl-r
+  newtio.c_cc[VDISCARD] = 0;  // Ctrl-u
+  newtio.c_cc[VWERASE]  = 0;  // Ctrl-w
+  newtio.c_cc[VLNEXT]   = 0;  // Ctrl-v
+  newtio.c_cc[VEOL2]    = 0;  // '\0'
+
+  // now clean the modem line and activate the settings for the port
+  debug_print(3, "Cleaning line and activating port settings");
+  tcflush(fd, TCIFLUSH);
+  tcsetattr(fd, TCSANOW, &newtio);
 
   // ready to handle input; daemonize if required
   // refer: http://www.danielhall.me/2010/01/writing-a-daemon-in-c/
@@ -714,23 +513,36 @@ int main(int argc, char **argv) {
     close(STDERR_FILENO);
   }
 
+  // serial port settings done, now handle input
+  debug_print(2, "Begining loop");
+  char buf[255];
+  char dbgmsg[300];
+  while (STOP == FALSE) {
+    /* read blocks program execution until a line terminating character is
+     * input, even if more than 255 chars are input. If the number
+     * of characters read is smaller than the number of chars available,
+     * subsequent reads will return the remaining chars. res will be set
+     * to the actual number of characters actually read
+    */
+    res = read(fd, buf, 255);
 
-  // Refer: http://www.yolinux.com/TUTORIALS/LinuxTutorialPosixThreads.html
-  pthread_t thread1, thread2;
-  int iret1, iret2;
-  
-  // Create independent threads
-  debug_print(3, "Creating SERIO thread");
-  iret1 = pthread_create( &thread1, NULL, &thr_read_from_serial, NULL);
-  debug_print(3, "Creating AMQP thread");
-  iret2 = pthread_create( &thread2, NULL, &thr_amqp_publish, NULL);
+    // switch the trailing newline for null
+    buf[res-1] = '\0';
 
-  /* Wait till threads are complete before main continues. Unless we
-   * wait we run the risk of executing an exit which will terminate
-   * the process and all threads before the threads have completed.
-   */
-  debug_print(3, "Joining serial port operations thread");
-  pthread_join( thread1, NULL);
-  debug_print(3, "Joining AMQP operations thread");
-  pthread_join( thread2, NULL);
+    // don't output blank lines
+    if (res-1 < 1) {
+      continue;
+    }
+
+    // show debug info
+    snprintf(dbgmsg, sizeof(dbgmsg), "Recv %d characters: %s", res, buf);
+    debug_print(1, dbgmsg);
+
+    // output just the received data to stdout
+    //printf("%s\n", buf);
+    amqpsend(buf);
+
+    // exit if the buffer starts with 'z' (TODO)
+    //if (buf[0]=='z') STOP=TRUE;
+  }
 }
