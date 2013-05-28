@@ -42,6 +42,7 @@
  */
 
 #include <stdio.h>    // perror() and printf()
+#include <stdint.h>   // avoid error: unknown type name on arm architecture
 #include <string.h>   // strchr()
 #include <strings.h>  // bzero()
 #include <fcntl.h>    // open()
