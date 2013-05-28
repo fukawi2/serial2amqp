@@ -51,6 +51,7 @@
 #include <signal.h>   // handling signals
 #include <termios.h>  // all serial port functions and constants
 #include <syslog.h>   // logging
+#include <time.h>     // gmtime for timestamping msgs
 //#include <sys/types.h>
 //#include <sys/stat.h>
 
@@ -515,16 +516,17 @@ int main(int argc, char **argv) {
 
   // serial port settings done, now handle input
   debug_print(2, "Begining loop");
-  char buf[255];
-  char dbgmsg[300];
+  char buf[512];
+  char dbgmsg[1024];
+  char publish_buffer[1024];
   while (STOP == FALSE) {
     /* read blocks program execution until a line terminating character is
-     * input, even if more than 255 chars are input. If the number
+     * input, even if more than sizeof(buf) chars are input. If the number
      * of characters read is smaller than the number of chars available,
      * subsequent reads will return the remaining chars. res will be set
      * to the actual number of characters actually read
     */
-    res = read(fd, buf, 255);
+    res = read(fd, buf, sizeof(buf));
 
     // switch the trailing newline for null
     buf[res-1] = '\0';
@@ -534,15 +536,25 @@ int main(int argc, char **argv) {
       continue;
     }
 
+    // prepend a gmt timestamp to the msg before we publish it
+    time_t    now;
+    struct tm ts;
+    char      tz[80];
+    time(&now);
+    ts = *localtime(&now);
+    strftime(tz, sizeof(tz), "%Y-%m-%d %H:%M:%S%z;", &ts); // the ; is the delimiter for the published msg
+
+    // build the buffer that we want to publish (with unix timestamp prepended)
+    publish_buffer[0] = '\0';
+    strncat(publish_buffer, tz, sizeof(publish_buffer));
+    strncat(publish_buffer, buf, sizeof(publish_buffer));
+
     // show debug info
-    snprintf(dbgmsg, sizeof(dbgmsg), "Recv %d characters: %s", res, buf);
+    snprintf(dbgmsg, sizeof(dbgmsg), "Recv %d characters: %s", res, publish_buffer);
     debug_print(1, dbgmsg);
 
     // output just the received data to stdout
-    //printf("%s\n", buf);
-    amqpsend(buf);
-
-    // exit if the buffer starts with 'z' (TODO)
-    //if (buf[0]=='z') STOP=TRUE;
+    printf("%s\n", publish_buffer);
+    amqpsend(publish_buffer);
   }
 }
