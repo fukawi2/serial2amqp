@@ -54,7 +54,7 @@
 #include <syslog.h>   // logging
 #include <time.h>     // gmtime for timestamping msgs
 //#include <sys/types.h>
-//#include <sys/stat.h>
+#include <sys/stat.h> // umask()
 
 #include <amqp.h>
 #include <amqp_framing.h>
