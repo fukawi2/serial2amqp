@@ -558,4 +558,7 @@ int main(int argc, char **argv) {
     printf("%s\n", publish_buffer);
     amqpsend(publish_buffer);
   }
+
+  // once we get here we are done so we can exit
+  return 0;
 }
