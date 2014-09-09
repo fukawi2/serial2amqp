@@ -264,9 +264,13 @@ int amqpsend(const char *msg) {
   // open a connection to the server
   debug_print(2, "Connecting to AMQP Broker");
   amqp_connection_state_t conn;
-  int sockfd;
   conn = amqp_new_connection();
-  die_on_error(sockfd = amqp_open_socket(amqp_hostname, amqp_port), "Opening socket");
+  int sockfd;
+  sockfd = amqp_open_socket(amqp_hostname, amqp_port);
+  if (sockfd < 0) { 
+    debug_print(2, "ERROR connecting to AMQP broker"); 
+    return 1; 
+  } 
 
   // authenticate
   debug_print(2, "Authenticating");
