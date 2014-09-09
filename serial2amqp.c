@@ -541,6 +541,15 @@ int main(int argc, char **argv) {
       continue;
     }
 
+    // log the raw input to file
+    FILE * logfile;
+    logfile = fopen("msglog.txt", "a");  
+    if (logfile != 0) {
+      fwrite(buf, 1, sizeof(buf), logfile);
+      fclose(logfile);
+    }
+    free(logfile);
+
     // prepend a gmt timestamp to the msg before we publish it
     time_t    now;
     struct tm ts;
