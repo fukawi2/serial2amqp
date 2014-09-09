@@ -556,7 +556,7 @@ int main(int argc, char **argv) {
     char      tz[80];
     time(&now);
     ts = *localtime(&now);
-    strftime(tz, sizeof(tz), "%Y-%m-%d %H:%M:%S%z;", &ts); // the ; is the delimiter for the published msg
+    strftime(tz, sizeof(tz), "%Y-%m-%d %H:%M:%S%z,", &ts); // the ; is the delimiter for the published msg
 
     // build the buffer that we want to publish (with unix timestamp prepended)
     publish_buffer[0] = '\0';
