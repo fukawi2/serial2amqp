@@ -1,6 +1,9 @@
 serial2amqp
 ================================
 
+CentOS 7 with EPEL can just install "librabbitmq-devel" and go directly to
+"Compile serial2amqp" below.
+
 Download and compile supporting code:
 
     git clone git://github.com/alanxz/rabbitmq-c.git
