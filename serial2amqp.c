@@ -569,7 +569,12 @@ int main(int argc, char **argv) {
 
     // output just the received data to stdout
     printf("%s\n", publish_buffer);
-    amqpsend(publish_buffer);
+    int res = -1;
+    while ( res != 0 ) {
+      // just dumb keep retrying
+      res = amqpsend(publish_buffer);
+      sleep(2);
+    }
   }
 
   // once we get here we are done so we can exit
