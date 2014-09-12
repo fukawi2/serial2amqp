@@ -11,7 +11,7 @@ ExecStart=/usr/local/bin/serial2amqp \
 	-E EXCHANGE_NAME_HERE \
 	-K ROUTING_KEY
 GuessMainPID=yes
-Restart=on-abort
+Restart=always
 
 [Install]
 WantedBy=multi-user.target
