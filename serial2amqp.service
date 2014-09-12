@@ -1,0 +1,17 @@
+[Unit]
+Description=serial to amqp service
+Requires=network.target
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/usr/local/bin/serial2amqp \
+	-D /dev/DEVICE/HERE \
+	-H broker.example.com \
+	-E EXCHANGE_NAME_HERE \
+	-K ROUTING_KEY
+GuessMainPID=yes
+Restart=on-abort
+
+[Install]
+WantedBy=multi-user.target
