@@ -202,7 +202,7 @@ void debug_print(int msg_lvl, const char *msg)
 
 void die_on_error(int x, char const *context) {
   if (x < 0) {
-    char *errstr = amqp_error_string(-x);
+    char *errstr = amqp_error_string2(x);
     fprintf(stderr, "%s: %s\n", context, errstr);
     free(errstr);
     exit(1);
@@ -221,7 +221,7 @@ void die_on_amqp_error(amqp_rpc_reply_t x, char const *context) {
       break;
 
     case AMQP_RESPONSE_LIBRARY_EXCEPTION:
-      fprintf(stderr, "%s: %s\n", context, amqp_error_string(x.library_error));
+      fprintf(stderr, "%s: %s\n", context, amqp_error_string2(x.library_error));
       break;
 
     case AMQP_RESPONSE_SERVER_EXCEPTION:
