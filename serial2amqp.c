@@ -56,6 +56,7 @@
 //#include <sys/types.h>
 #include <sys/stat.h> // umask()
 
+#include <amqp_tcp_socket.h>
 #include <amqp.h>
 #include <amqp_framing.h>
 
@@ -256,25 +257,30 @@ void die_on_amqp_error(amqp_rpc_reply_t x, char const *context) {
 
 int amqpsend(const char *msg) {
   int amqp_channel = 1; // TODO: handle dynamic channel number
+  int status;
+  amqp_socket_t *socket = NULL;
+  amqp_connection_state_t conn;
+  amqp_bytes_t messagebody;
 
   // build the message body
-  amqp_bytes_t messagebody;
   messagebody = amqp_cstring_bytes(msg);
 
   // open a connection to the server
   debug_print(2, "Connecting to AMQP Broker");
-  amqp_connection_state_t conn;
   conn = amqp_new_connection();
-  int sockfd;
-  sockfd = amqp_open_socket(amqp_hostname, amqp_port);
-  if (sockfd < 0) { 
-    debug_print(2, "ERROR connecting to AMQP broker"); 
-    return 1; 
-  } 
+  socket = amqp_tcp_socket_new(conn);
+  if (!socket) { 
+    debug_print(2, "ERROR creating TCP socket");
+    return 1;
+  }
+  status = amqp_socket_open(socket, amqp_hostname, amqp_port);
+  if (status) {
+    debug_print(2, "ERROR opening TCP socket");
+    return 1;
+  }
 
   // authenticate
   debug_print(2, "Authenticating");
-  amqp_set_sockfd(conn, sockfd);
   die_on_amqp_error(
       amqp_login(
         conn, amqp_vhost, 0, 131072, 0, AMQP_SASL_METHOD_PLAIN, amqp_username, amqp_password
@@ -309,14 +315,10 @@ int amqpsend(const char *msg) {
 
   // cleanup by closing all our connections
   debug_print(4, "Cleaning up AMQP Connection");
-  debug_print(5, "Closing channel");
-  die_on_amqp_error(
-      amqp_channel_close(conn, amqp_channel, AMQP_REPLY_SUCCESS),
-      "Closing channel");
-  debug_print(5, "Closing connection");
-  die_on_amqp_error(
-      amqp_connection_close(conn, AMQP_REPLY_SUCCESS),
-      "Closing connection");
+  //debug_print(5, "Closing connection");
+  //die_on_amqp_error(
+  //    amqp_connection_close(conn, AMQP_REPLY_SUCCESS),
+  //    "Closing connection");
   debug_print(5, "Ending connection");
   die_on_error(
       amqp_destroy_connection(conn),
